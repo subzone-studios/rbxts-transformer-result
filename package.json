@@ -1,11 +1,12 @@
 {
 	"name": "rbxts-transformer-result",
-	"version": "0.0.1",
+	"version": "0.0.2",
 	"description": "Transformer for Roblox TypeScript compiler",
 	"main": "out/index.js",
 	"scripts": {
 		"build": "tsc",
-		"prepublish": "bun run build"
+		"prepublish": "tsc",
+		"prepare": "tsc"
 	},
 	"repository": {
 		"type": "git",
@@ -19,7 +20,10 @@
 		"colors": "^1.4.0",
 		"dotenv": "^8.2.0",
 		"ts-expose-internals": "=5.2.2",
-		"typescript": "~5.5.3"
+		"typescript": "5.5.3"
+	},
+	"peerDependencies": {
+		"typescript": "*"
 	},
 	"devDependencies": {
 		"@rbxts/types": "^1.0.428",
@@ -31,5 +35,9 @@
 		"eslint-config-prettier": "^6.15.0",
 		"eslint-plugin-prettier": "^3.1.4",
 		"prettier": "^2.2.1"
-	}
+	},
+	"files": [
+		"out",
+		"index.d.ts"
+	]
 }
