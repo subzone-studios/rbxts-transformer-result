@@ -2,104 +2,134 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /* eslint-disable @typescript-eslint/explicit-module-boundary-types */
 import ts from "typescript";
-import { TransformConfiguration, TransformState } from "./class/transformState";
-import { transformFile } from "./transform/transformFile";
-import { LoggerProvider } from "./class/logProvider";
-import { EnvironmentProvider } from "./class/environmentProvider";
 
-const DEFAULTS: TransformConfiguration = {
-	verbose: false,
-	defaultEnvironment: "production",
-	shortCircuitNodeEnv: true,
-	expectedVariables: undefined,
-};
+function isTryCall(node: ts.Expression): node is ts.CallExpression {
+	return (
+		ts.isCallExpression(node) &&
+		ts.isIdentifier(node.expression) &&
+		node.expression.text === "$try" &&
+		node.arguments.length === 1
+	);
+}
 
-export default function transform(program: ts.Program, userConfiguration: TransformConfiguration) {
-	userConfiguration = { ...DEFAULTS, ...userConfiguration };
-	const isProduction = (process.env.NODE_ENV ?? userConfiguration.defaultEnvironment) === "production";
-
-	if (process.argv.includes("--verbose")) {
-		userConfiguration.verbose = true;
-	}
-
-	const logger = new LoggerProvider(userConfiguration.verbose!, userConfiguration.verbose!);
-
-	if (logger.verbose) {
-		logger.write("\n");
-	}
-	logger.infoIfVerbose("Loaded environment transformer");
-	let performedVariableCheck = false;
-
+export default function transform() {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
-		const state = new TransformState(program, context, userConfiguration, logger);
+		const factory = context.factory;
 
-		if (state.symbolProvider.moduleFile === undefined) {
-			return file => file;
+		function transformVariableStatement(statement: ts.VariableStatement): ts.Statement[] {
+			const output = new Array<ts.Statement>();
+
+			for (const declaration of statement.declarationList.declarations) {
+				const initializer = declaration.initializer;
+
+				if (!initializer || !isTryCall(initializer)) {
+					const transformed = ts.visitEachChild(declaration, visitor, context);
+
+					output.push(
+						factory.createVariableStatement(
+							statement.modifiers,
+							factory.createVariableDeclarationList([transformed], statement.declarationList.flags),
+						),
+					);
+
+					continue;
+				}
+
+				const result = factory.createUniqueName("__try");
+
+				// const __try = expression;
+				output.push(
+					factory.createVariableStatement(
+						undefined,
+						factory.createVariableDeclarationList(
+							[
+								factory.createVariableDeclaration(
+									result,
+									undefined,
+									undefined,
+									ts.visitNode(initializer.arguments[0], visitor) as ts.Expression,
+								),
+							],
+							ts.NodeFlags.Const,
+						),
+					),
+				);
+
+				// if (__try.isErr()) {
+				//     return __try as never;
+				// }
+				output.push(
+					factory.createIfStatement(
+						factory.createCallExpression(
+							factory.createPropertyAccessExpression(result, "isErr"),
+							undefined,
+							[],
+						),
+						factory.createBlock(
+							[
+								factory.createReturnStatement(
+									factory.createAsExpression(
+										result,
+										factory.createKeywordTypeNode(ts.SyntaxKind.NeverKeyword),
+									),
+								),
+							],
+							true,
+						),
+					),
+				);
+
+				// const x = __try.unwrap();
+				const value = factory.createCallExpression(
+					factory.createPropertyAccessExpression(result, "unwrap"),
+					undefined,
+					[],
+				);
+
+				output.push(
+					factory.createVariableStatement(
+						statement.modifiers,
+						factory.createVariableDeclarationList(
+							[
+								factory.updateVariableDeclaration(
+									declaration,
+									declaration.name,
+									declaration.exclamationToken,
+									declaration.type,
+									value,
+								),
+							],
+							statement.declarationList.flags,
+						),
+					),
+				);
+			}
+
+			return output;
 		}
 
-		if (userConfiguration.expectedVariables && !performedVariableCheck) {
-			let hasDiagnostic = false;
+		function transformBlock(node: ts.Block): ts.Block {
+			const statements = new Array<ts.Statement>();
 
-			for (const [variable, variableRequireConfig] of Object.entries(userConfiguration.expectedVariables)) {
-				const hasVariable = state.environmentProvider.has(variable);
-				if (!hasVariable) {
-					if (typeof variableRequireConfig === "string") {
-						if (
-							variableRequireConfig === "error" ||
-							(isProduction && variableRequireConfig === "errorOnProduction")
-						) {
-							logger.error(`Expected enviroment variable: '${variable}'`);
-							hasDiagnostic = true;
-						} else if (variableRequireConfig === "warn") {
-							logger.warnIfVerbose(`Missing environment variable '${variable}'`);
-						}
-					} else {
-						const [handler, message] = variableRequireConfig;
-						if (handler === "error" || (isProduction && handler === "errorOnProduction")) {
-							logger.error(message);
-							hasDiagnostic = true;
-						} else if (handler === "warn") {
-							logger.warnIfVerbose(message);
-						}
-					}
+			for (const statement of node.statements) {
+				if (ts.isVariableStatement(statement)) {
+					statements.push(...transformVariableStatement(statement));
+				} else {
+					statements.push(ts.visitEachChild(statement, visitor, context) as ts.Statement);
 				}
 			}
 
-			if (hasDiagnostic) {
-				throw new Error(`Required environment variable(s) have not been configured - see above`);
-			}
-
-			performedVariableCheck = true;
+			return factory.updateBlock(node, statements);
 		}
 
-		return (file: ts.SourceFile) => {
-			let printFile = false;
-
-			const leading = ts.getLeadingCommentRanges(file.getFullText(), 0);
-			if (leading) {
-				const metaComment = "// @rbxts-transform-env";
-
-				const srcFileText = file.getFullText();
-				for (const leadingComment of leading) {
-					const comment = srcFileText.substring(leadingComment.pos, leadingComment.end);
-					if (comment.startsWith(metaComment)) {
-						const metaTags = comment.substring(metaComment.length + 1).split(" ");
-						if (metaTags.includes("debug:print_file")) {
-							printFile = true;
-						}
-						break;
-					}
-				}
+		function visitor(node: ts.Node): ts.VisitResult<ts.Node> {
+			if (ts.isBlock(node)) {
+				return transformBlock(node);
 			}
 
-			const result = transformFile(state, file);
+			return ts.visitEachChild(node, visitor, context);
+		}
 
-			if (printFile) {
-				const printer = ts.createPrinter({});
-				console.log(printer.printFile(result));
-			}
-
-			return result;
-		};
+		return (file: ts.SourceFile) => ts.visitNode(file, visitor) as ts.SourceFile;
 	};
 }

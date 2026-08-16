@@ -5,7 +5,6 @@
 	"main": "out/index.js",
 	"scripts": {
 		"build": "tsc",
-		"yalc": "tsc && yalc push",
 		"prepublish": "bun run build"
 	},
 	"repository": {
