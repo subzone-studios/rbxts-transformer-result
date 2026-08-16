@@ -3,7 +3,7 @@ interface ResultLike<T, E> {
 	isErr(): boolean;
 	isOk(): boolean;
 	expect(message: string): T;
-	expectError(message: string): E;
+	expectErr(message: string): E;
 	unwrap(): T;
 	unwrapErr(): E;
 }
