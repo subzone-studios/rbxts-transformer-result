@@ -14,6 +14,20 @@ export default function (program: ts.Program) {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
 		const factory = context.factory;
 
+		function transformStatements(statements: ts.NodeArray<ts.Statement>): ts.Statement[] {
+			const output = new Array<ts.Statement>();
+
+			for (const statement of statements) {
+				if (ts.isVariableStatement(statement)) {
+					output.push(...transformVariableStatement(statement));
+				} else {
+					output.push(ts.visitEachChild(statement, visitor, context) as ts.Statement);
+				}
+			}
+
+			return output;
+		}
+
 		function transformVariableStatement(statement: ts.VariableStatement): ts.Statement[] {
 			const output = new Array<ts.Statement>();
 
@@ -106,20 +120,6 @@ export default function (program: ts.Program) {
 			return output;
 		}
 
-		function transformBlock(node: ts.Block): ts.Block {
-			const statements = new Array<ts.Statement>();
-
-			for (const statement of node.statements) {
-				if (ts.isVariableStatement(statement)) {
-					statements.push(...transformVariableStatement(statement));
-				} else {
-					statements.push(ts.visitEachChild(statement, visitor, context) as ts.Statement);
-				}
-			}
-
-			return factory.updateBlock(node, statements);
-		}
-
 		function visitor(node: ts.Node): ts.VisitResult<ts.Node> | undefined {
 			if (
 				ts.isImportDeclaration(node) &&
@@ -129,8 +129,12 @@ export default function (program: ts.Program) {
 				return undefined;
 			}
 
+			if (ts.isSourceFile(node)) {
+				return factory.updateSourceFile(node, transformStatements(node.statements));
+			}
+
 			if (ts.isBlock(node)) {
-				return transformBlock(node);
+				return factory.updateBlock(node, transformStatements(node.statements));
 			}
 
 			return ts.visitEachChild(node, visitor, context);
