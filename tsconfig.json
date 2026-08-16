@@ -8,9 +8,6 @@
       "@types/node",
       "ts-expose-internals"
     ],
-    "typeRoots": [
-      "node_modules/@types"
-    ],
     "strict": true, /* Enable all strict type-checking options. */
     "resolveJsonModule": true,
     "downlevelIteration": true,
