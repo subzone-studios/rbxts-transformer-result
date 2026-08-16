@@ -10,7 +10,143 @@ function isTryCall(node: ts.Expression): node is ts.CallExpression {
 	);
 }
 
+type ReturnableFunction =
+	| ts.FunctionDeclaration
+	| ts.FunctionExpression
+	| ts.ArrowFunction
+	| ts.MethodDeclaration
+	| ts.GetAccessorDeclaration;
+
+function getContainingFunction(node: ts.Node): ReturnableFunction | undefined {
+	let current = node.parent;
+
+	while (current) {
+		if (
+			ts.isFunctionDeclaration(current) ||
+			ts.isFunctionExpression(current) ||
+			ts.isArrowFunction(current) ||
+			ts.isMethodDeclaration(current) ||
+			ts.isGetAccessorDeclaration(current)
+		) {
+			return current;
+		}
+
+		current = current.parent;
+	}
+
+	return undefined;
+}
+
+type DiagnosticContext = ts.TransformationContext & {
+	addDiagnostic(diagnostic: ts.DiagnosticWithLocation): void;
+};
+
+function addError(context: ts.TransformationContext, node: ts.Node, messageText: string) {
+	const file = node.getSourceFile();
+
+	(context as DiagnosticContext).addDiagnostic({
+		category: ts.DiagnosticCategory.Error,
+		code: 90001,
+		file,
+		start: node.getStart(file),
+		length: node.getWidth(file),
+		messageText,
+	});
+}
+
 export default function (program: ts.Program) {
+	const checker = program.getTypeChecker();
+
+	function getMethodReturnType(type: ts.Type, name: string, location: ts.Node): ts.Type | undefined {
+		const property = type.getProperty(name);
+		if (!property) {
+			return undefined;
+		}
+
+		const propertyType = checker.getTypeOfSymbolAtLocation(property, location);
+
+		const signature = propertyType.getCallSignatures()[0];
+		if (!signature) {
+			return undefined;
+		}
+
+		return checker.getReturnTypeOfSignature(signature);
+	}
+
+	function isResultLike(type: ts.Type, location: ts.Node): boolean {
+		return (
+			getMethodReturnType(type, "isErr", location) !== undefined &&
+			getMethodReturnType(type, "unwrap", location) !== undefined &&
+			getMethodReturnType(type, "unwrapErr", location) !== undefined &&
+			getMethodReturnType(type, "expect", location) !== undefined &&
+			getMethodReturnType(type, "expectErr", location) !== undefined
+		);
+	}
+
+	function validateTryCall(call: ts.CallExpression, context: ts.TransformationContext): boolean {
+		const func = getContainingFunction(call);
+
+		if (!func) {
+			addError(context, call, "$try() can only be used inside a function returning Result.");
+			return false;
+		}
+
+		if (!func.type) {
+			addError(context, call, "$try() requires the containing function to have an explicit Result return type.");
+			return false;
+		}
+
+		const returnType = checker.getTypeFromTypeNode(func.type);
+
+		if (!isResultLike(returnType, func.type)) {
+			addError(
+				context,
+				call,
+				`$try() can only be used inside a function returning Result; this function returns ${checker.typeToString(
+					returnType,
+				)}.`,
+			);
+			return false;
+		}
+
+		const argument = call.arguments[0];
+		const argumentType = checker.getTypeAtLocation(argument);
+
+		if (!isResultLike(argumentType, argument)) {
+			// Usually TS should catch this through $try's declaration anyway.
+			addError(context, call, "$try() argument must be a Result.");
+			return false;
+		}
+
+		const inputError = getMethodReturnType(argumentType, "unwrapErr", argument);
+
+		const outputError = getMethodReturnType(returnType, "unwrapErr", func.type);
+
+		if (!inputError) {
+			addError(context, call, `No method return type for argument ${argument} (${argumentType})`);
+			return false;
+		}
+
+		if (!outputError) {
+			addError(context, call, `No method return type for output return type ${returnType} (${func.type})`);
+			return false;
+		}
+
+		if (!checker.isTypeAssignableTo(inputError, outputError)) {
+			addError(
+				context,
+				call,
+				`Cannot propagate ${checker.typeToString(inputError)} into Result<_, ${checker.typeToString(
+					outputError,
+				)}>.`,
+			);
+
+			return false;
+		}
+
+		return true;
+	}
+
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
 		const factory = context.factory;
 
@@ -46,6 +182,8 @@ export default function (program: ts.Program) {
 
 					continue;
 				}
+
+				validateTryCall(initializer, context);
 
 				const result = factory.createUniqueName("__try");
 
