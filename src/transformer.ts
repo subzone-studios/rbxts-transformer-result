@@ -120,7 +120,15 @@ export default function (program: ts.Program) {
 			return factory.updateBlock(node, statements);
 		}
 
-		function visitor(node: ts.Node): ts.VisitResult<ts.Node> {
+		function visitor(node: ts.Node): ts.VisitResult<ts.Node> | undefined {
+			if (
+				ts.isImportDeclaration(node) &&
+				ts.isStringLiteral(node.moduleSpecifier) &&
+				node.moduleSpecifier.text === "rbxts-transformer-result"
+			) {
+				return undefined;
+			}
+
 			if (ts.isBlock(node)) {
 				return transformBlock(node);
 			}
