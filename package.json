@@ -1,6 +1,6 @@
 {
 	"name": "rbxts-transformer-result",
-	"version": "3.0.0",
+	"version": "3.1.0",
 	"description": "Transformer for Roblox TypeScript compiler",
 	"main": "out/index.js",
 	"scripts": {

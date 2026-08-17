@@ -57,6 +57,14 @@ function addError(context: ts.TransformationContext, node: ts.Node, messageText:
 export default function (program: ts.Program) {
 	const checker = program.getTypeChecker();
 
+	function isTransformerImport(statement: ts.Statement): statement is ts.ImportDeclaration {
+		return (
+			ts.isImportDeclaration(statement) &&
+			ts.isStringLiteral(statement.moduleSpecifier) &&
+			statement.moduleSpecifier.text === "rbxts-transformer-result"
+		);
+	}
+
 	function getMethodReturnType(type: ts.Type, name: string, location: ts.Node): ts.Type | undefined {
 		const property = type.getProperty(name);
 		if (!property) {
@@ -96,7 +104,20 @@ export default function (program: ts.Program) {
 			return false;
 		}
 
-		const returnType = checker.getTypeFromTypeNode(func.type);
+		let returnType = checker.getTypeFromTypeNode(func.type);
+
+		const isAsync = func.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+
+		if (isAsync) {
+			const promisedType = checker.getPromisedTypeOfPromise(returnType);
+
+			if (!promisedType) {
+				addError(context, call, "$try() inside an async function requires Promise<Result<...>>.");
+				return false;
+			}
+
+			returnType = promisedType;
+		}
 
 		if (!isResultLike(returnType, func.type)) {
 			addError(
@@ -150,15 +171,67 @@ export default function (program: ts.Program) {
 	return (context: ts.TransformationContext): ((file: ts.SourceFile) => ts.Node) => {
 		const factory = context.factory;
 
+		function transformTryExpression(call: ts.CallExpression): ts.Statement[] {
+			validateTryCall(call, context);
+
+			const result = factory.createUniqueName("__try");
+
+			// const __try = expression;
+			const declaration = factory.createVariableStatement(
+				undefined,
+				factory.createVariableDeclarationList(
+					[
+						factory.createVariableDeclaration(
+							result,
+							undefined,
+							undefined,
+							ts.visitNode(call.arguments[0], visitor) as ts.Expression,
+						),
+					],
+					ts.NodeFlags.Const,
+				),
+			);
+
+			// if (__try.isErr()) {
+			//     return __try as never;
+			// }
+			const guard = factory.createIfStatement(
+				factory.createCallExpression(factory.createPropertyAccessExpression(result, "isErr"), undefined, []),
+				factory.createBlock(
+					[
+						factory.createReturnStatement(
+							factory.createAsExpression(
+								result,
+								factory.createKeywordTypeNode(ts.SyntaxKind.NeverKeyword),
+							),
+						),
+					],
+					true,
+				),
+			);
+
+			return [declaration, guard];
+		}
+
 		function transformStatements(statements: ts.NodeArray<ts.Statement>): ts.Statement[] {
 			const output = new Array<ts.Statement>();
 
 			for (const statement of statements) {
+				if (isTransformerImport(statement)) {
+					continue;
+				}
+
+				if (ts.isExpressionStatement(statement) && isTryCall(statement.expression)) {
+					output.push(...transformTryExpression(statement.expression));
+					continue;
+				}
+
 				if (ts.isVariableStatement(statement)) {
 					output.push(...transformVariableStatement(statement));
-				} else {
-					output.push(ts.visitEachChild(statement, visitor, context) as ts.Statement);
+					continue;
 				}
+
+				output.push(ts.visitEachChild(statement, visitor, context) as ts.Statement);
 			}
 
 			return output;
